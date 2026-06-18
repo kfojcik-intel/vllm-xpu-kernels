@@ -192,6 +192,14 @@ class XpuFusedMoe:
             self.gemm1_scales = w13_scales
             self.gemm2_scales = w2_scales
 
+        # CUTLASS grouped GEMM only supports per-expert (1D) FP8 scales.
+        # If scales are per-channel (numel > num_experts), fall back to ref.
+        self._scales_incompatible = False
+        if self.gemm1_scales is not None and self.gemm1_scales.numel() != num_experts:
+            self._scales_incompatible = True
+        if self.gemm2_scales is not None and self.gemm2_scales.numel() != num_experts:
+            self._scales_incompatible = True
+
         self.w13_bias = w13_bias
         self.w2_bias = w2_bias
 
@@ -252,7 +260,7 @@ class XpuFusedMoe:
         topk_ids,
         expert_map=None,
     ):
-        if self._use_ref:
+        if self._use_ref or self._scales_incompatible:
             self._apply_ref(output, hidden_states,
                             topk_weights, topk_ids,
                             expert_map)
@@ -485,6 +493,12 @@ def xpu_fused_moe(hidden_states,
     else:
         gemm1_scales = w13_scales
         gemm2_scales = w2_scales
+        # For FP8, the CUTLASS kernel expects scales as 1D [num_experts].
+        if is_fp8:
+            if gemm1_scales is not None and gemm1_scales.dim() > 1:
+                gemm1_scales = gemm1_scales.view(num_experts)
+            if gemm2_scales is not None and gemm2_scales.dim() > 1:
+                gemm2_scales = gemm2_scales.view(num_experts)
 
     if expert_map is None and ep_size > 1:
         expert_map = torch.empty((num_experts * ep_size),
